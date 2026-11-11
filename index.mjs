@@ -12,7 +12,7 @@ const SEVERITIES = ["low", "medium", "high", "critical"]
 const LOCKFILES = new Set([
   "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock",
   "poetry.lock", "Pipfile.lock", "uv.lock", "Cargo.lock", "Gemfile.lock", "composer.lock",
-  "go.sum", "packages.lock.json", "gradle.lockfile",
+  "packages.lock.json", "gradle.lockfile",
 ])
 const SKIP = new Set([".git", "node_modules", "vendor", "dist", "build", ".venv", "venv", "target", ".next", "__pycache__"])
 const MAX_CHARACTERS = 500_000
@@ -135,6 +135,11 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
   const notes = []
   let annotations = 0
   for (const file of files) {
+    // go.sum is checksums, not the versions a build uses: go.mod says those, and checking go.sum would only spend credits.
+    if (path.posix.basename(file) === "go.sum") {
+      notes.push(`${file}: not checked. go.mod holds the versions; go.sum is only checksums.`)
+      continue
+    }
     const content = readFileSync(path.join(root, file), "utf8")
     if (content.length > MAX_CHARACTERS) {
       notes.push(`${file}: over ${MAX_CHARACTERS.toLocaleString("en-US")} characters, not checked.`)
@@ -162,6 +167,11 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
       }
       notes.push(`${file}: ${message}`)
       continue
+    }
+    // An answer still being read is not the whole answer: say so, so a clean run is not read as a clean bill.
+    if (body?.reading) {
+      const releases = Number(body.reading.releases) || 0
+      notes.push(`${file}: Since is still reading ${releases ? `${releases.toLocaleString("en-US")} newer release${releases === 1 ? "" : "s"}` : "newer releases"} of its dependencies. A later run includes what they changed.`)
     }
     for (const finding of body?.findings ?? []) {
       const where = finding.where?.find((place) => place.file) ?? { file, line: null }

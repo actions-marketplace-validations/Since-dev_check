@@ -111,6 +111,22 @@ test("a run checks each file, annotates findings, writes the summary and fails o
   assert.match(result.output, /findings=2\nfailing=1/)
 })
 
+test("go.sum is never sent, and an answer still being read says so", async () => {
+  const root = repo({ "go.mod": "module x", "go.sum": "example.com/a v1.0.0 h1:abc=" })
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push(JSON.parse(init.body))
+    return Response.json({ findings: [], reading: { retryAfterSec: 60, releases: 12 } })
+  }
+  const result = await withInputs({ "api-key": "sc_test", files: "**/go.mod\n**/go.sum" }, () => run({ root, fetchImpl }))
+  assert.equal(result.code, 0)
+  // One call, for go.mod: the checksums file spends nothing.
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].manifest.path, "go.mod")
+  assert.match(result.summary, /go\.sum: not checked\. go\.mod holds the versions; go\.sum is only checksums\./)
+  assert.match(result.summary, /go\.mod: Since is still reading 12 newer releases of its dependencies\. A later run includes what they changed\./)
+})
+
 test("no key: a notice and a pass, the way a fork's pull request runs", async () => {
   const result = await withInputs({ files: "**/package.json" }, () => run({ root: repo({ "package.json": "{}" }), fetchImpl: () => assert.fail("no call") }))
   assert.equal(result.code, 0)

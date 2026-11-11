@@ -44,7 +44,7 @@ The `paths` filter runs it only when a manifest changes. Every file it checks is
 | Input | Default | What it does |
 | --- | --- | --- |
 | `api-key` | none | A workspace API key. Without one the run skips with a notice. |
-| `files` | the common manifests | Which files to check, one pattern per line. `**/` matches any folder, `*` matches inside a name. Add lockfiles such as `**/package-lock.json` to check the exact versions you install. |
+| `files` | the common manifests | Which files to check, one pattern per line. `**/` matches any folder, `*` matches inside a name. Add lockfiles such as `**/package-lock.json` to check the exact versions you install. `go.sum` is never sent: it holds checksums, and `go.mod` holds the versions. |
 | `max-files` | `10` | The most files one run checks. |
 | `fail-on` | `high` | Fail on a proven finding of this severity or higher: `low`, `medium`, `high`, `critical`, or `none`. A finding Since could not settle never fails the run. |
 | `api-url` | `https://api.since.dev` | The API to call. |
