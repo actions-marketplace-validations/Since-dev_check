@@ -55,6 +55,7 @@ The `paths` filter runs it only when a manifest changes. Every file it checks is
 | --- | --- |
 | `findings` | How many findings the checked files have. |
 | `failing` | How many of them are proven and at or above `fail-on`. |
+| `as-of` | What the answer is current as of, an ISO time: the oldest point its sources had been read up to. Empty when no source says. |
 
 ## What it costs
 

@@ -40,6 +40,8 @@ outputs:
     description: How many findings the checked files have.
   failing:
     description: How many of them are at or above fail-on and proven.
+  as-of:
+    description: What the answer is current as of, an ISO time; empty when no source says.
 runs:
   using: node24
   main: index.mjs

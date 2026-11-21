@@ -50,6 +50,14 @@ function output(name, value) {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`)
 }
 
+/** What to move to, and the exact line to write or the command to run when Since read one back and checked it. */
+function moveTo(finding) {
+  const edit = finding.edit
+  if (edit && typeof edit.command === "string" && edit.command) return `${cell(finding.replacement)}: run \`${cell(edit.command)}\``
+  if (edit && typeof edit.to === "string" && edit.to.trim()) return `${cell(finding.replacement)}: write \`${cell(edit.to.trim())}\` at line ${cell(edit.line)}`
+  return cell(finding.replacement)
+}
+
 function summary(markdown) {
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${markdown}\n`)
   else log(markdown)
@@ -134,6 +142,7 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
   const rows = []
   const notes = []
   let annotations = 0
+  let asOf = null
   for (const file of files) {
     // go.sum is checksums, not the versions a build uses: go.mod says those, and checking go.sum would only spend credits.
     if (path.posix.basename(file) === "go.sum") {
@@ -173,6 +182,8 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
       const releases = Number(body.reading.releases) || 0
       notes.push(`${file}: Since is still reading ${releases ? `${releases.toLocaleString("en-US")} newer release${releases === 1 ? "" : "s"}` : "newer releases"} of its dependencies. A later run includes what they changed.`)
     }
+    // What the sources behind the answer had been read up to: the run is current as of the oldest of them.
+    if (typeof body?.coverage?.asOf === "string" && (asOf === null || body.coverage.asOf < asOf)) asOf = body.coverage.asOf
     for (const finding of body?.findings ?? []) {
       const where = finding.where?.find((place) => place.file) ?? { file, line: null }
       const failing = fails(finding, failOn)
@@ -195,6 +206,8 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
   summary(rows.length === 0
     ? `No findings in ${files.length === 1 ? "the 1 file" : `the ${files.length} files`} checked.`
     : `${rows.length} finding${rows.length === 1 ? "" : "s"} in ${files.length} file${files.length === 1 ? "" : "s"}${failOn === "none" ? "." : `, ${failing} at ${failOn} or above and proven.`}`)
+  if (asOf) summary(`\nCurrent as of ${asOf.replace("T", " ").replace(/:\d{2}(\.\d+)?Z$/, " UTC")}.`)
+  output("as-of", asOf ?? "")
   if (rows.length > 0) {
     summary("")
     summary("| Severity | What | Where | When | Move to |")
@@ -207,7 +220,7 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
       const subject = [finding.surface?.name, finding.version].filter(Boolean).join(" ")
       const place = where.line ? `${where.file}:${where.line}` : where.file
       const state = finding.state === "needs_review" ? " (not settled)" : ""
-      summary(`| ${cell(finding.severity)}${state} | ${cell(subject)}: ${cell(finding.reason)} | \`${cell(place)}\` | ${cell(when(finding))} | ${cell(finding.replacement)} |`)
+      summary(`| ${cell(finding.severity)}${state} | ${cell(subject)}: ${cell(finding.reason)} | \`${cell(place)}\` | ${cell(when(finding))} | ${moveTo(finding)} |`)
     }
     if (sorted.length > MAX_ROWS) summary(`\nAnd ${sorted.length - MAX_ROWS} more, less severe.`)
   }
