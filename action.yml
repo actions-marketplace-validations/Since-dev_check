@@ -24,9 +24,9 @@ inputs:
       **/build.gradle.kts
       **/*.csproj
   max-files:
-    description: The most files one run checks. Each file is one check, and each check costs credits.
+    description: The most files one run sends, manifests and the lockfiles beside them. They are checked together, 50 at a time.
     required: false
-    default: "10"
+    default: "50"
   fail-on:
     description: "Fail the run on a proven finding of this severity or higher: low, medium, high, critical, or none to never fail."
     required: false

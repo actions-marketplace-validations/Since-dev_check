@@ -89,7 +89,7 @@ const FINDING = {
   where: [{ file: "src/llm.ts", line: 14 }],
 }
 
-test("a run checks each file, annotates findings, writes the summary and fails on a proven high", async () => {
+test("a run checks the files together, annotates findings, writes the summary and fails on a proven high", async () => {
   const root = repo({ "package.json": '{"dependencies":{"openai":"3.3.0"}}', "go.mod": "module x" })
   const calls = []
   const fetchImpl = async (url, init) => {
@@ -99,7 +99,9 @@ test("a run checks each file, annotates findings, writes the summary and fails o
   }
   const result = await withInputs({ "api-key": "sc_test", files: "**/package.json\n**/go.mod", "fail-on": "high" }, () => run({ root, fetchImpl }))
   assert.equal(result.code, 1)
-  assert.equal(calls.length, 2)
+  // One set of files: both are read together, so an import is checked at the version the same files pin.
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].body.files.map((file) => file.path), ["go.mod", "package.json"])
   assert.equal(calls[0].url, "https://api.since.dev/v1/check")
   assert.equal(calls[0].init.headers.Authorization, "Bearer sc_test")
   assert.match(result.log, /::error file=src\/llm.ts,line=14,title=high%3A openai 3.3.0::openai 3.3.0 calls an endpoint OpenAI removed. Move to 4.0.0./)
@@ -122,9 +124,20 @@ test("go.sum is never sent, and an answer still being read says so", async () =>
   assert.equal(result.code, 0)
   // One call, for go.mod: the checksums file spends nothing.
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].manifest.path, "go.mod")
+  assert.deepEqual(calls[0].files.map((file) => file.path), ["go.mod"])
   assert.match(result.summary, /go\.sum: not checked\. go\.mod holds the versions; go\.sum is only checksums\./)
-  assert.match(result.summary, /go\.mod: Since is still reading 12 newer releases of its dependencies\. A later run includes what they changed\./)
+  assert.match(result.summary, /Since is still reading 12 newer releases of the dependencies\. A later run includes what they changed\./)
+})
+
+test("sends each manifest with the lockfiles beside it, and leaves out a lockfile over the size, naming it", async () => {
+  const root = repo({ "web/package.json": '{"dependencies":{"lodash":"^4.17.0"}}', "web/package-lock.json": "{}", "api/package.json": "{}", "api/yarn.lock": "x".repeat(500_001) })
+  const calls = []
+  const result = await withInputs({ "api-key": "k", files: "**/package.json" }, () =>
+    run({ root, fetchImpl: async (_url, init) => (calls.push(JSON.parse(init.body)), Response.json({ findings: [] })) }))
+  assert.equal(result.code, 0)
+  assert.deepEqual(calls[0].files.map((file) => file.path), ["api/package.json", "web/package.json", "web/package-lock.json"])
+  assert.match(result.summary, /api\/yarn\.lock: over 500,000 characters, not checked; its manifest was read as a fresh install would land\./)
+  assert.match(result.summary, /No findings in the 3 files checked\./)
 })
 
 test("no key: a notice and a pass, the way a fork's pull request runs", async () => {
@@ -152,19 +165,22 @@ test("max-files caps what one run checks, and says so", async () => {
   let calls = 0
   const result = await withInputs({ "api-key": "k", files: "**/package.json", "max-files": "2" }, () =>
     run({ root, fetchImpl: async () => (calls++, Response.json({ findings: [] })) }))
-  assert.equal(calls, 2)
+  assert.equal(calls, 1)
   assert.equal(result.code, 0)
   assert.match(result.log, /3 files matched; checked the first 2/)
   assert.match(result.summary, /No findings in the 2 files checked\./)
 })
 
-test("says what the run is current as of: the oldest of the answers' sources", async () => {
-  const root = repo({ "a/package.json": "{}", "b/package.json": "{}" })
+test("sends 50 files a set, and says what the run is current as of: the oldest of the answers' sources", async () => {
+  // 51 manifests: two sets, 50 and 1.
+  const root = repo(Object.fromEntries(Array.from({ length: 51 }, (_, at) => [`p${String(at).padStart(2, "0")}/package.json`, "{}"])))
   const asOf = ["2026-11-21T09:10:00.000Z", "2026-11-21T08:58:42.000Z"]
   let at = 0
-  const result = await withInputs({ "api-key": "k", files: "**/package.json" }, () =>
-    run({ root, fetchImpl: async () => Response.json({ findings: [], coverage: { sources: [], missing: [], asOf: asOf[at++] } }) }))
+  const sizes = []
+  const result = await withInputs({ "api-key": "k", files: "**/package.json", "max-files": "60" }, () =>
+    run({ root, fetchImpl: async (_url, init) => (sizes.push(JSON.parse(init.body).files.length), Response.json({ findings: [], coverage: { sources: [], missing: [], asOf: asOf[at++] } })) }))
   assert.equal(result.code, 0)
+  assert.deepEqual(sizes, [50, 1])
   assert.match(result.summary, /Current as of 2026-11-21 08:58 UTC\./)
   assert.match(result.output, /as-of=2026-11-21T08:58:42.000Z\n/)
 })

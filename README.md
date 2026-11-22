@@ -37,15 +37,15 @@ jobs:
           fail-on: high
 ```
 
-The `paths` filter runs it only when a manifest changes. Every file it checks is one call to the API, which costs credits, so this keeps runs to the pull requests that need them.
+The `paths` filter runs it only when a manifest changes, which keeps runs to the pull requests that need them.
 
 ## Inputs
 
 | Input | Default | What it does |
 | --- | --- | --- |
 | `api-key` | none | A workspace API key. Without one the run skips with a notice. |
-| `files` | the common manifests | Which files to check, one pattern per line. `**/` matches any folder, `*` matches inside a name. Add lockfiles such as `**/package-lock.json` to check the exact versions you install. `go.sum` is never sent: it holds checksums, and `go.mod` holds the versions. |
-| `max-files` | `10` | The most files one run checks. |
+| `files` | the common manifests | Which files to check, one pattern per line. `**/` matches any folder, `*` matches inside a name. Each manifest is sent with the lockfiles in its folder, so the versions checked are the ones you install. `go.sum` is never sent: it holds checksums, and `go.mod` holds the versions. |
+| `max-files` | `50` | The most files one run sends, manifests and the lockfiles beside them. They are checked together, 50 at a time. |
 | `fail-on` | `high` | Fail on a proven finding of this severity or higher: `low`, `medium`, `high`, `critical`, or `none`. A finding Since could not settle never fails the run. |
 | `api-url` | `https://api.since.dev` | The API to call. |
 
@@ -59,7 +59,7 @@ The `paths` filter runs it only when a manifest changes. Every file it checks is
 
 ## What it costs
 
-Each file is one check of a manifest or lockfile. Prices change, so see [since.dev/#pricing](https://since.dev/#pricing) for the current cost per check and what each plan includes. A call that fails costs nothing.
+The files go together as one set of files, 50 at a time, so each import is checked at the version the same files pin. A set costs credits for each file that names a package or runtime, never more than checking the files one by one. Prices change, so see [since.dev/#pricing](https://since.dev/#pricing) for the current cost and what each plan includes. A call that fails costs nothing.
 
 ## Pull requests from forks
 
