@@ -31,6 +31,14 @@ inputs:
     description: "Fail the run on a proven finding of this severity or higher: low, medium, high, critical, or none to never fail."
     required: false
     default: high
+  github-token:
+    description: The token that reads a pull request's changed files and the base's versions of them, for the upgrade receipt. The default works.
+    required: false
+    default: ${{ github.token }}
+  block-upgrades:
+    description: "true fails the run when a move of an upgrade-only pull request is not clear; by default it warns."
+    required: false
+    default: "false"
   api-url:
     description: The API to call.
     required: false
@@ -42,6 +50,10 @@ outputs:
     description: How many of them are at or above fail-on and proven.
   as-of:
     description: What the answer is current as of, an ISO time; empty when no source says.
+  receipts:
+    description: How many moves an upgrade-only pull request makes, each with its receipt in the summary.
+  not-clear:
+    description: How many of those moves are not clear.
 runs:
   using: node24
   main: index.mjs

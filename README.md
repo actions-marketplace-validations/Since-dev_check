@@ -24,8 +24,15 @@ on:
       - "**/pom.xml"
       - "**/build.gradle*"
       - "**/*.csproj"
+      - "**/package-lock.json"
+      - "**/pnpm-lock.yaml"
+      - "**/yarn.lock"
+      - "**/poetry.lock"
+      - "**/uv.lock"
+      - "**/Cargo.lock"
 permissions:
   contents: read
+  pull-requests: read
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -37,7 +44,7 @@ jobs:
           fail-on: high
 ```
 
-The `paths` filter runs it only when a manifest changes, which keeps runs to the pull requests that need them.
+The `paths` filter runs it only when a manifest or a lockfile changes, which keeps runs to the pull requests that need them. `pull-requests: read` lets the run read an upgrade-only pull request's changed files for its receipt.
 
 ## Inputs
 
@@ -47,6 +54,8 @@ The `paths` filter runs it only when a manifest changes, which keeps runs to the
 | `files` | the common manifests | Which files to check, one pattern per line. `**/` matches any folder, `*` matches inside a name. Each manifest is sent with the lockfiles in its folder, so the versions checked are the ones you install. `go.sum` is never sent: it holds checksums, and `go.mod` holds the versions. |
 | `max-files` | `50` | The most files one run sends, manifests and the lockfiles beside them. They are checked together, 50 at a time. |
 | `fail-on` | `high` | Fail on a proven finding of this severity or higher: `low`, `medium`, `high`, `critical`, or `none`. A finding Since could not settle never fails the run. |
+| `github-token` | `${{ github.token }}` | Reads an upgrade-only pull request's changed files and the base's versions of them, for the upgrade receipt. The default works. |
+| `block-upgrades` | `false` | `true` fails the run when a move of an upgrade-only pull request is not clear. By default it warns. |
 | `api-url` | `https://api.since.dev` | The API to call. |
 
 ## Outputs
@@ -56,6 +65,20 @@ The `paths` filter runs it only when a manifest changes, which keeps runs to the
 | `findings` | How many findings the checked files have. |
 | `failing` | How many of them are proven and at or above `fail-on`. |
 | `as-of` | What the answer is current as of, an ISO time: the oldest point its sources had been read up to. Empty when no source says. |
+| `receipts` | How many moves an upgrade-only pull request makes, each with its receipt in the summary. |
+| `not-clear` | How many of those moves are not clear. |
+
+## Upgrade receipts on pull requests
+
+On a pull request that changes only manifests and lockfiles (a dependency bot's update, a grouped one, or your own bump), the run also
+reads each move from the base to the head and writes its receipt in the summary:
+
+- **Clear:** every release of the move was read in full and nothing in them reaches your code: nothing found in what was read.
+- **Not clear:** the release, what it changed and the line in your code it breaks, also as a warning on that line.
+- **Not settled:** what was not read, or what still needs review.
+
+It reads the base's versions of the changed files with the run's own `github-token`, and sends the code files that import each moved
+package, so what the move breaks in them is read. A not clear move warns; `block-upgrades: true` fails the run instead.
 
 ## What it costs
 

@@ -162,6 +162,93 @@ function when(finding) {
   return finding.daysLeft === 0 ? "today" : `in ${finding.daysLeft} days`
 }
 
+const MANIFEST_NAME = /^(?:package\.json|requirements[^/]*\.txt|pyproject\.toml|go\.mod|Cargo\.toml|Gemfile|composer\.json|pom\.xml|build\.gradle(?:\.kts)?|[^/]+\.csproj)$/
+const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rb|java|kt|cs|php|rs|swift|scala|ex|exs|dart)$/i
+
+/** Whether a path is a manifest or a lockfile, by its name. */
+export const dependencyFile = (file) => MANIFEST_NAME.test(path.posix.basename(file)) || LOCKFILES.has(path.posix.basename(file))
+
+/** The code files under root that import a package (a quoted module name, or Python's import), nearest the top first, up to `limit`. */
+export function importingFiles(root, name, ecosystem, limit = MAX_SET_FILES) {
+  const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const pattern = ecosystem === "pypi"
+    ? new RegExp(`^\\s*(?:import|from)\\s+${escape(name.toLowerCase().replace(/[-.]+/g, "_"))}\\b`, "im")
+    : new RegExp(`["'\`]${escape(name)}(?:/[^"'\`]*)?["'\`]`)
+  const found = []
+  let seen = 0
+  const walk = (folder) => {
+    for (const entry of readdirSync(path.join(root, folder), { withFileTypes: true })) {
+      if (++seen > 20_000 || found.length >= limit) return
+      const relative = folder ? `${folder}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        if (!SKIP.has(entry.name) && !entry.name.startsWith(".")) walk(relative)
+      } else if (entry.isFile() && CODE_FILE.test(entry.name)) {
+        const content = readFileSync(path.join(root, relative), "utf8")
+        if (content.length <= MAX_CHARACTERS && pattern.test(content)) found.push({ path: relative, content })
+      }
+    }
+  }
+  walk("")
+  return found.sort((a, b) => a.path.split("/").length - b.path.split("/").length || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+}
+
+/**
+ * The upgrade receipt on a pull request that changes only manifests and lockfiles (Features plan step 33): the files as the base has them
+ * (read through GitHub's API) and as the pull request leaves them (the checkout) go to POST /v1/check with `upgrade`, then again with the
+ * code files that import each moved package, and each move's receipt goes in the summary. Null when the run is not such a pull request.
+ */
+export async function upgradeReceipts({ root, api, key, fetchImpl, block }) {
+  if (!["pull_request", "pull_request_target"].includes(process.env.GITHUB_EVENT_NAME ?? "") || !process.env.GITHUB_EVENT_PATH) return null
+  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"))
+  const pull = event.pull_request
+  const repository = process.env.GITHUB_REPOSITORY
+  const token = input("github-token")
+  if (!pull?.number || !pull.base?.sha || !repository || !token) return null
+  const github = async (route) => {
+    const response = await fetchImpl(`${(process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "")}/repos/${repository}${route}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "since-dev-check-action" }, signal: AbortSignal.timeout(30_000) })
+    return response.ok ? response.json() : null
+  }
+  const changed = await github(`/pulls/${pull.number}/files?per_page=100`)
+  if (!Array.isArray(changed) || !changed.length || changed.length > MAX_SET_FILES || changed.some((file) => file.status === "removed" || !dependencyFile(file.filename))) return null
+  const base = []
+  const head = []
+  for (const file of changed) {
+    const now = path.join(root, file.filename)
+    try {
+      head.push({ path: file.filename, content: readFileSync(now, "utf8") })
+    } catch {}
+    const at = await github(`/contents/${file.filename.split("/").map(encodeURIComponent).join("/")}?ref=${pull.base.sha}`)
+    let content = at && typeof at.content === "string" && at.encoding === "base64" && at.content ? Buffer.from(at.content, "base64").toString("utf8") : null
+    if (at && content === null && typeof at.sha === "string") {
+      const blob = await github(`/git/blobs/${at.sha}`)
+      content = blob && typeof blob.content === "string" ? Buffer.from(blob.content, "base64").toString("utf8") : null
+    }
+    if (content !== null) base.push({ path: file.filename, content })
+  }
+  if (!base.length || !head.length) return null
+  const ask = async (files) => {
+    const response = await fetchImpl(`${api}/v1/check`, { method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "User-Agent": "since-dev-check-action" },
+      body: JSON.stringify({ files, upgrade: head, detail: "summary" }), signal: AbortSignal.timeout(120_000) })
+    const body = await response.json().catch(() => null)
+    return response.ok && Array.isArray(body?.receipts) ? body.receipts : null
+  }
+  const first = await ask(base)
+  if (!first) return { receipts: [], failed: true }
+  if (!first.length) return { receipts: [] }
+  // The code that calls each moved package, so what the move breaks in it is read: the receipt never clears a move no code was read for.
+  const files = [...base]
+  for (const receipt of first) {
+    for (const file of importingFiles(root, receipt.package?.name ?? "", receipt.package?.ecosystem)) {
+      if (files.length < MAX_SET_FILES && !files.some((other) => other.path === file.path)) files.push(file)
+    }
+  }
+  const receipts = files.length > base.length ? (await ask(files)) ?? first : first
+  const notClear = receipts.filter((receipt) => receipt.verdict === "not_clear")
+  return { receipts, notClear: notClear.length, blocks: block && notClear.length > 0 }
+}
+
 export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd(), fetchImpl = fetch } = {}) {
   const key = input("api-key")
   if (!key) {
@@ -253,6 +340,23 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
     }
   }
 
+  // An upgrade-only pull request also gets each move's receipt: clear, not clear (the release and the line) or not settled.
+  const upgrade = await upgradeReceipts({ root, api, key, fetchImpl, block: input("block-upgrades", "false").toLowerCase() === "true" }).catch(() => null)
+  if (upgrade?.receipts?.length) {
+    summary("## Upgrade receipt")
+    summary("")
+    for (const receipt of upgrade.receipts) {
+      summary(`- **${cell(receipt.package?.name)} ${cell(receipt.from ?? "?")} to ${cell(receipt.to)}:** ${cell(receipt.sentence)}`)
+      const place = (receipt.reaching ?? []).find((entry) => entry.state !== "needs_review")?.where?.find((where) => where.file)
+      if (receipt.verdict === "not_clear") annotate(upgrade.blocks ? "error" : "warning", receipt.sentence, place ? { file: place.file, line: place.line, title: `Upgrade receipt: ${receipt.package?.name}` } : {})
+    }
+    summary("")
+    summary("Clear means every release of the move was read in full and nothing in them reaches the code: nothing found in what was read.")
+    summary("")
+  } else if (upgrade?.failed) notes.push("The upgrade receipt could not be read: Since did not answer.")
+  output("receipts", upgrade?.receipts?.length ?? 0)
+  output("not-clear", upgrade?.notClear ?? 0)
+
   const failing = rows.filter((row) => row.failing).length
   summary("## Since.dev check")
   summary("")
@@ -285,6 +389,11 @@ export async function run({ root = process.env.GITHUB_WORKSPACE || process.cwd()
   output("failing", failing)
   if (failing > 0) {
     annotate("error", `${failing} proven finding${failing === 1 ? "" : "s"} at ${failOn} or above.`)
+    return 1
+  }
+  // A not clear move fails the run only where the repository asked it to (block-upgrades); otherwise it warns.
+  if (upgrade?.blocks) {
+    annotate("error", `${upgrade.notClear} move${upgrade.notClear === 1 ? "" : "s"} of this pull request ${upgrade.notClear === 1 ? "is" : "are"} not clear.`)
     return 1
   }
   return 0

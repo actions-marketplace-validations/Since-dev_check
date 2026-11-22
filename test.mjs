@@ -192,3 +192,46 @@ test("says the exact line to write in the summary when the answer has one", asyn
   const result = await withInputs({ "api-key": "k", files: "package.json", "fail-on": "none" }, () => run({ root, fetchImpl: async () => Response.json({ findings: [finding] }) }))
   assert.match(result.summary, /4\.18\.1: write `"lodash": "4\.18\.1"` at line 6/)
 })
+
+test("an upgrade-only pull request gets each move's receipt: the base read through GitHub, then again with the code that imports it", async () => {
+  const root = repo({
+    "package.json": JSON.stringify({ dependencies: { express: "4.21.2" } }),
+    "src/app.ts": 'import express from "express";\nconst app = express();\napp.get("/", (req, res) => res.redirect(req.query.next));\n',
+    "src/util.ts": "export const add = (a, b) => a + b;\n",
+  })
+  const events = mkdtempSync(path.join(tmpdir(), "since-action-event-"))
+  const eventPath = path.join(events, "event.json")
+  writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7, base: { sha: "b".repeat(40) }, head: { sha: "h".repeat(40) } } }))
+  const base = JSON.stringify({ dependencies: { express: "4.19.2" } })
+  const sent = []
+  const receipt = { package: { ecosystem: "npm", name: "express" }, from: "4.19.2", to: "4.21.2", verdict: "not_clear",
+    sentence: "Not clear: 4.21.0 res.redirect no longer takes an untrusted URL, at src/app.ts:3.", releases: { releases: 3, full: 3, list: [] },
+    reaching: [{ changeId: "c", release: "4.21.0", title: "res.redirect changed", state: "upgrade_blocker", where: [{ file: "src/app.ts", line: 3 }] }] }
+  const fetchImpl = async (url, options = {}) => {
+    const address = String(url)
+    if (address.endsWith("/repos/acme/app/pulls/7/files?per_page=100")) return Response.json([{ filename: "package.json", status: "modified" }])
+    if (address.includes("/repos/acme/app/contents/package.json?ref=")) return Response.json({ type: "file", encoding: "base64", content: Buffer.from(base).toString("base64"), sha: "s" })
+    if (address.endsWith("/v1/check")) {
+      const body = JSON.parse(options.body)
+      sent.push(body)
+      if (body.upgrade) return Response.json({ findings: [], receipts: [body.files.length > 1 ? receipt : { ...receipt, verdict: "not_settled", reaching: [], sentence: "No code read imports express." }] })
+      return Response.json({ findings: [] })
+    }
+    return new Response("not found", { status: 404 })
+  }
+  const result = await withInputs({ "api-key": "k", "github-token": "t", files: DEFAULT_FILES }, () => {
+    Object.assign(process.env, { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: "acme/app", GITHUB_API_URL: "https://api.github.com" })
+    return run({ root, fetchImpl })
+  })
+  const upgrades = sent.filter((body) => body.upgrade)
+  assert.equal(upgrades.length, 2)
+  assert.deepEqual(upgrades[0].files.map((file) => file.path), ["package.json"])
+  assert.equal(upgrades[0].files[0].content, base)
+  assert.deepEqual(upgrades[1].files.map((file) => file.path), ["package.json", "src/app.ts"])
+  assert.deepEqual(upgrades[1].upgrade.map((file) => file.path), ["package.json"])
+  assert.match(result.summary, /## Upgrade receipt/)
+  assert.match(result.summary, /\*\*express 4\.19\.2 to 4\.21\.2:\*\* Not clear: 4\.21\.0 res\.redirect/)
+  assert.match(result.log, /::warning file=src\/app\.ts,line=3,title=Upgrade receipt%3A express::Not clear/)
+  assert.match(result.output, /not-clear=1/)
+  assert.equal(result.code, 0)
+})
