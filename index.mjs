@@ -15,6 +15,12 @@ const LOCKFILES = new Set([
   "poetry.lock", "Pipfile.lock", "uv.lock", "Cargo.lock", "Gemfile.lock", "composer.lock",
   "packages.lock.json", "gradle.lockfile",
 ])
+/** The manifest a lockfile resolves, in its own folder: what says which of its packages the project declares itself. */
+const MANIFESTS_OF = {
+  "package-lock.json": ["package.json"], "npm-shrinkwrap.json": ["package.json"], "pnpm-lock.yaml": ["package.json"], "yarn.lock": ["package.json"],
+  "bun.lock": ["package.json"], "poetry.lock": ["pyproject.toml"], "uv.lock": ["pyproject.toml"], "Pipfile.lock": ["Pipfile"], "Cargo.lock": ["Cargo.toml"],
+  "Gemfile.lock": ["Gemfile"], "composer.lock": ["composer.json"], "gradle.lockfile": ["build.gradle", "build.gradle.kts"],
+}
 const SKIP = new Set([".git", "node_modules", "vendor", "dist", "build", ".venv", "venv", "target", ".next", "__pycache__"])
 const MAX_CHARACTERS = 500_000
 /** The most files one set holds: the API's own limit on `files`. */
@@ -165,6 +171,26 @@ function when(finding) {
 const MANIFEST_NAME = /^(?:package\.json|requirements[^/]*\.txt|pyproject\.toml|go\.mod|Cargo\.toml|Gemfile|composer\.json|pom\.xml|build\.gradle(?:\.kts)?|[^/]+\.csproj)$/
 const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rb|java|kt|cs|php|rs|swift|scala|ex|exs|dart)$/i
 
+/**
+ * The manifests beside a pull request's changed lockfiles that it leaves as they are (`poetry.lock` changed, `pyproject.toml` not): the same
+ * at the base and the head, and what tells a package the project declares from one only the lockfile holds.
+ */
+export function manifestsBeside(root, changed) {
+  const paths = new Set(changed)
+  const out = []
+  for (const file of changed) {
+    const folder = path.posix.dirname(file)
+    for (const name of MANIFESTS_OF[path.posix.basename(file)] ?? []) {
+      const manifest = folder === "." ? name : `${folder}/${name}`
+      if (paths.has(manifest) || out.some((other) => other.path === manifest)) continue
+      try {
+        out.push({ path: manifest, content: readFileSync(path.join(root, manifest), "utf8") })
+      } catch {}
+    }
+  }
+  return out
+}
+
 /** Whether a path is a manifest or a lockfile, by its name. */
 export const dependencyFile = (file) => MANIFEST_NAME.test(path.posix.basename(file)) || LOCKFILES.has(path.posix.basename(file))
 
@@ -227,6 +253,12 @@ export async function upgradeReceipts({ root, api, key, fetchImpl, block }) {
     if (content !== null) base.push({ path: file.filename, content })
   }
   if (!base.length || !head.length) return null
+  // A manifest the pull request leaves as it is reads the same at both ends: without it, every package of a lockfile that does not say what
+  // the project declares (poetry.lock, Cargo.lock) would read as an indirect dependency, checked against its dependents' calls, not the code's.
+  for (const manifest of manifestsBeside(root, changed.map((file) => file.filename))) {
+    base.push(manifest)
+    head.push(manifest)
+  }
   const ask = async (files) => {
     const response = await fetchImpl(`${api}/v1/check`, { method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "User-Agent": "since-dev-check-action" },

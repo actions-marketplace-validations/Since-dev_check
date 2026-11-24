@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { test } from "node:test"
 
-import { checkBody, fails, matchFiles, patternRegExp, run, sentence } from "./index.mjs"
+import { checkBody, fails, manifestsBeside, matchFiles, patternRegExp, run, sentence } from "./index.mjs"
 
 const DEFAULT_FILES = readFileSync(new URL("./action.yml", import.meta.url), "utf8")
   .split("default: |")[1]
@@ -235,3 +235,36 @@ test("an upgrade-only pull request gets each move's receipt: the base read throu
   assert.match(result.output, /not-clear=1/)
   assert.equal(result.code, 0)
 })
+
+test("a pull request that changes only a lockfile sends the manifest beside it at both ends, so a declared package reads as direct", async () => {
+  const pyproject = '[tool.poetry.dependencies]\npython = "^3.11"\ntyper = ">=0.9"\n'
+  const root = repo({ "pyproject.toml": pyproject, "poetry.lock": "[[package]]\nname = \"typer\"\nversion = \"0.26.8\"\n", "app/main.py": "import typer\n" })
+  assert.deepEqual(manifestsBeside(root, ["poetry.lock"]), [{ path: "pyproject.toml", content: pyproject }])
+  // A manifest the pull request changed is already sent as changed, never twice.
+  assert.deepEqual(manifestsBeside(root, ["poetry.lock", "pyproject.toml"]), [])
+  const events = mkdtempSync(path.join(tmpdir(), "since-action-event-"))
+  const eventPath = path.join(events, "event.json")
+  writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 9, base: { sha: "b".repeat(40) }, head: { sha: "h".repeat(40) } } }))
+  const baseLock = "[[package]]\nname = \"typer\"\nversion = \"0.26.7\"\n"
+  const sent = []
+  const fetchImpl = async (url, options = {}) => {
+    const address = String(url)
+    if (address.endsWith("/repos/acme/app/pulls/9/files?per_page=100")) return Response.json([{ filename: "poetry.lock", status: "modified" }])
+    if (address.includes("/repos/acme/app/contents/poetry.lock?ref=")) return Response.json({ type: "file", encoding: "base64", content: Buffer.from(baseLock).toString("base64"), sha: "s" })
+    if (address.endsWith("/v1/check")) {
+      const body = JSON.parse(options.body)
+      sent.push(body)
+      return Response.json({ findings: [], receipts: body.upgrade ? [] : undefined })
+    }
+    return new Response("not found", { status: 404 })
+  }
+  await withInputs({ "api-key": "k", "github-token": "t", files: DEFAULT_FILES }, () => {
+    Object.assign(process.env, { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: "acme/app", GITHUB_API_URL: "https://api.github.com" })
+    return run({ root, fetchImpl })
+  })
+  const upgrade = sent.find((body) => body.upgrade)
+  assert.deepEqual(upgrade.files.map((file) => file.path), ["poetry.lock", "pyproject.toml"])
+  assert.equal(upgrade.files[0].content, baseLock)
+  assert.deepEqual(upgrade.upgrade.map((file) => file.path), ["poetry.lock", "pyproject.toml"])
+})
+
